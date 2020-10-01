@@ -120,7 +120,7 @@ class InvertibleCheckpointFunction(torch.autograd.Function):
 
 class InvertibleModuleWrapper(nn.Module):
     def __init__(self, fn, keep_input=False, keep_input_inverse=False, num_bwd_passes=1,
-                 disable=False, preserve_rng_state=False):
+                 disable=False, preserve_rng_state=False, device=None):
         """
         The InvertibleModuleWrapper which enables memory savings during training by exploiting
         the invertible properties of the wrapped module.
@@ -157,6 +157,10 @@ class InvertibleModuleWrapper(nn.Module):
                 this is False since most invertible modules should have a valid inverse and hence are
                 deterministic.
 
+            device : :obj:`torch.device`, optional
+                If specified, target device module will be moved to. Otherwise module is untouched.
+
+
         Attributes
         ----------
             keep_input : :obj:`bool`, optional
@@ -176,6 +180,15 @@ class InvertibleModuleWrapper(nn.Module):
         self.preserve_rng_state = preserve_rng_state
         self._fn = fn
 
+        if device is None:
+            def _to_device(module):
+                return module
+        else:
+            def _to_device(module):
+                return module.to(device)
+
+        self._to_device = _to_device
+
     def forward(self, *xin):
         """Forward operation :math:`R(x) = y`
 
@@ -190,18 +203,20 @@ class InvertibleModuleWrapper(nn.Module):
                 Output torch tensor(s) *y.
 
         """
+        original_device = next(self._fn.parameters()).device
+        _fn = self._to_device(self._fn)
         if not self.disable:
             y = InvertibleCheckpointFunction.apply(
-                self._fn.forward,
-                self._fn.inverse,
+                _fn.forward,
+                _fn.inverse,
                 self.keep_input,
                 self.num_bwd_passes,
                 self.preserve_rng_state,
                 len(xin),
                 *(xin + tuple([p for p in self._fn.parameters() if p.requires_grad])))
         else:
-            y = self._fn(*xin)
-
+            y = _fn(*xin)
+        _fn.to(original_device)
         # If the layer only has one input, we unpack the tuple again
         if isinstance(y, tuple) and len(y) == 1:
             return y[0]
@@ -221,6 +236,8 @@ class InvertibleModuleWrapper(nn.Module):
                 Output torch tensor(s) *x.
 
         """
+        original_device = next(self._fn.parameters()).device
+        _fn = self._to_device(self._fn)
         if not self.disable:
             x = InvertibleCheckpointFunction.apply(
                 self._fn.inverse,
@@ -232,6 +249,7 @@ class InvertibleModuleWrapper(nn.Module):
                 *(yin + tuple([p for p in self._fn.parameters() if p.requires_grad])))
         else:
             x = self._fn.inverse(*yin)
+        _fn.to(original_device)
 
         # If the layer only has one input, we unpack the tuple again
         if isinstance(x, tuple) and len(x) == 1:
